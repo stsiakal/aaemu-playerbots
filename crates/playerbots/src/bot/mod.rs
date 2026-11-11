@@ -34,6 +34,7 @@ pub mod guild;
 pub mod manner;
 pub mod market;
 pub mod motion;
+pub mod mount;
 pub mod nav;
 pub mod party;
 pub mod place;
@@ -1031,6 +1032,12 @@ impl Bot {
 
     /// Moves the bot by the time since the last movement tick and queues its updates.
     fn motion_tick(&mut self, now_ms: u64) {
+        // A riding bot sends its updates for the mount (the server ignores a rider's own moves).
+        // Synced here as well as in the duty so a detach between two brain ticks stops it at once.
+        match self.state.travel.mount_ref() {
+            Some(m) if m.mounted() && m.mate_obj != 0 => self.motion.set_move_obj(m.mate_obj),
+            _ => self.motion.set_move_obj(0),
+        }
         let send_gap_ms = if self.watched {
             self.shared.cfg.bots.move_update_ms
         } else {
@@ -1065,12 +1072,24 @@ impl Bot {
             || st.place.loading()
     }
 
+    /// The mate and the glide end with a death, a teleport or an instance load (the server
+    /// removes the active mates then: `systems/instances/dungeon.rs:524`,
+    /// `systems/vehicles/mod.rs:531`).
+    fn mount_gone(&mut self) {
+        let base = (
+            self.shared.cfg.bots.move_speed,
+            self.shared.cfg.bots.walk_speed,
+        );
+        mount::on_gone(&mut self.state, &mut self.motion, &mut self.out, base);
+    }
+
     /// Answers what the state noticed: teleports, instance loads, death, resurrection, kicks.
     fn react(&mut self) -> Option<WorldEnd> {
         let r = std::mem::take(&mut self.state.reactions);
         if let Some(p) = r.teleport {
             self.motion.teleported(p);
             self.out.push(cs::teleport_ended(p[0], p[1], p[2]));
+            self.mount_gone();
         }
         if r.load_instance {
             if self.state.place.needs_resolve() {
@@ -1083,10 +1102,12 @@ impl Bot {
             self.motion.teleported(self.state.me.pos);
             self.out.push(cs::instance_loaded());
             self.state.place.loaded();
+            self.mount_gone();
         }
         if r.died {
             self.motion.stop();
             self.combat.reset();
+            self.mount_gone();
             self.log.say("died");
             if r.pack_dropped {
                 self.log

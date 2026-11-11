@@ -527,6 +527,70 @@ ship = "cutter"    # rowboat (default) | clipper | cutter | junk | yawl | schoon
 * Issue reports of the goal are `sail:*` (no boat, no seat, dead wheel, no thrust, slow boat, ignored
   despawn); see [ISSUES.md](ISSUES.md).
 
+## Mounts and gliders (`[mounts]`)
+
+Bots use the mount and glider they own the way a player does on a long trip: they summon the
+rideable mate of a `SummonMate` item, board it, ride at mount speed and get off again for a
+fight, a quest talk, a harvest or a dungeon door. They also wear a glider on their back and fly
+down a cliff that lies on their way instead of walking around it.
+
+**The mount.** The summon is the item's use skill (`item_summon_mates` names the mate's NPC
+template; the skill carries the `SpawnPet` effect), then `CSMountMatePacket` (0x0a7) takes the
+driver seat; the server answers `SCUnitAttached` and the mate's unit state (with its timeline id
+and object id). While riding, the bot sends its movement updates **for the mate** — a riding
+player's own `CSMoveUnit` is ignored by the server (`world/session.rs:1191`), so the client moves
+the mount instead — and gets off with `CSUnMountMatePacket` (0x0a8) or dismisses it with
+`CSRemoveMatePacket` (0x0a4). The mate is summoned only when the rest of the trip is at least
+`summon_over_m` long and the bot is moving, not fighting, not on a boat, not in an instance and
+not travelling by portal; it leaves the seat when the trip is down to `dismount_under_m`, when a
+fight starts or a blocking situation appears, and the standing mate is dismissed after
+`idle_despawn_secs`. A mate that stands too far away to board (the server allows 6 m) is dismissed
+and summoned again on the next long trip.
+
+Every request has a deadline: a summon without `SCMateSpawned`, a mount without
+`SCUnitAttached`, a refused skill (`SCSkillStarted.result != 0`) or an `SCErrorMsg` during the
+request backs every mount attempt off for two minutes; no item without GM rights backs it off for
+half an hour. A bot never loops on a refusal.
+
+**The glider.** A glider is a back-slot item (`item_backpacks.backpack_type_id = 2`) whose use
+skill the client starts with the item as caster; the server checks the back slot and the item's
+own skill (`systems/skills/glider.rs`). The bot puts the best glider it owns in the back slot
+(with `CSSwapItems`) while it is not fighting, and leaves a carried trade pack alone (the server
+refuses a glider swap while a pack is worn). While it walks with at least 20 m left it samples
+the ground up to `glide_lookahead_m` ahead: when the way falls away by at least `glide_drop_m` in one abrupt step
+(a cliff, not a slope), the line before the edge has no wall and the landing is dry, it deploys
+the glider and flies down along the current heading at `glide_speed` while descending
+`glide_descent`. The flight is the bot's own client-side physics (the 1.2 client's glider is not
+on the wire); it lands when the terrain meets it or the flight is 30 seconds old, sends the glide
+stance (4) in its movement updates and plans its navmesh route again from where it landed.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Master switch of mounts and gliders. |
+| `mounts` | `true` | Bots summon and ride mounts. |
+| `gliders` | `true` | Bots equip a glider and glide down a ledge. |
+| `summon_over_m` | `250.0` | The shortest trip a mount is summoned for, metres. |
+| `dismount_under_m` | `40.0` | A mounted bot dismounts when the rest of the trip is this short. |
+| `speed` | `10.0` | Mounted run and walk speed, m/s. |
+| `item` | `0` | The mount summon item; `0` = the lowest-id rideable mount of the bot's level (4177, the Lilyut horse). |
+| `glider_item` | `0` | The glider item; `0` = the lowest-id glider of the bot's level (16385, Tooloop's old glider). |
+| `idle_despawn_secs` | `120` | Dismiss a standing mate after this long without a trip (0 = keep it). |
+| `glide_drop_m` | `8.0` | The smallest fall that is worth gliding, metres. |
+| `glide_lookahead_m` | `30.0` | How far ahead the ground is sampled for a ledge, metres. |
+| `glide_speed` | `9.0` | Glide horizontal speed, m/s. |
+| `glide_descent` | `3.0` | Glide descent, m/s. |
+
+With `bots.gm_bootstrap` a bot grants itself the lowest-id rideable mount / glider of its level
+when its bag holds none (`/item add self <template> 1`). Without it, a bot only uses what it
+already carries; a mount it never gets is not retried for half an hour.
+
+**Limits.** The summon item and the glider are real items from the server data; a server whose
+data has no `item_summon_mates` / glider rows gets no mounts or gliders. There is no capture of
+the 1.2 client's exact mount speed or glider physics in this project, so `speed`, `glide_speed`
+and `glide_descent` are operator settings (the defaults are a horse's pace and a conservative
+glide), and the server does not validate either on a GM account. A bot does not use a carriage,
+an airship or a player's mount as a passenger.
+
 ## Farming (`[farm]`)
 
 With `[farm] enabled` bots plant crops, wait for them and harvest them, and they grow what the server

@@ -85,6 +85,14 @@ rounded routes and berth out at sea.
 *Seven bots sailing rowboats across the Arcadian Sea; the selected one shows its sailing log
 (speed, throttle, steering, heading error, distance to go).*
 
+**Mounts and gliders.** Bots ride the mount of a summon item they own on trips of 250 m or more:
+they summon the mate, board it, ride at mount speed and get off for a fight, a quest talk, a
+harvest or a dungeon door, and dismiss it after standing idle. They also wear a glider and fly
+down a cliff on their way instead of walking around it. With `bots.gm_bootstrap` a bot grants
+itself the mount and glider of its level when its bag holds none. `[mounts]` switches it off or
+tunes the threshold, the speed and the glide; see
+[OPERATING.md](docs/OPERATING.md#mounts-and-gliders-mounts).
+
 ### Group content
 
 **Dungeon parties.** Bots that like a fight ask the coordinator for a party of up to five (the
@@ -271,6 +279,8 @@ else is bounded: [docs/OPERATING.md](docs/OPERATING.md#memory-and-scale)).
   any quest comes within 1500 m, so a bot on its way can be drawn aside by a side quest.
 * Sailing is sea only (no lakes or rivers) and has no passengers yet; the bigger hulls sail with
   their driver only (no crew, no cannons, no cargo).
+* Mount speed and glider physics are bot-side settings (`[mounts]`): the 1.2 client's exact
+  values were not captured, and the server does not validate them for a GM account.
 * Portal ink and stones, boat scrolls and the dungeon level-up need the GM bootstrap unless the bot
   already carries them.
 * Built for, and tested against, AAEmu-1.2-Rust and the 1.2 client (r208022) only.

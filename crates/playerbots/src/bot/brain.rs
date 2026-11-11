@@ -397,6 +397,8 @@ impl Brain {
         let interval = ctx.cfg.llm.director_interval_secs;
         self.chat(&mut *ctx.rng, interval).social.tick(ctx);
         if ctx.state.me.dead {
+            let base = (ctx.cfg.bots.move_speed, ctx.cfg.bots.walk_speed);
+            super::mount::on_gone(ctx.state, ctx.motion, ctx.out, base);
             self.director_wake(ctx, Trigger::Died);
             // Dead bots drop their goal (a dungeon run goes on inside the dungeon); the bot task
             // asks for the resurrection.
@@ -417,6 +419,8 @@ impl Brain {
         // The same for the mail the auction house sends.
         super::goals::auction::duty(ctx);
         let combat = Combat::tick(ctx);
+        // Mounts and gliders: get off for a fight, summon for a long trip, glide off a ledge.
+        super::mount::duty(ctx);
         let now = ctx.now_ms;
         // A pack carrier (or a bot going back for a dropped one) does not take up anything new
         // but its trade run: no market deal, trade, party, event or duel.

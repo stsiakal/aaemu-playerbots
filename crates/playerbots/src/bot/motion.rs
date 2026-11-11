@@ -241,10 +241,38 @@ impl Stuck {
     }
 }
 
+/// A glide in progress: a fixed heading, a forward speed and a descent. The 1.2 client's glider
+/// physics is not on the wire, so the bot moves itself; see [`Motion::begin_glide`].
 #[derive(Debug, Clone, Copy)]
-struct PendingTeleport {
-    deadline_ms: u64,
+struct Glide {
+    /// Unit heading (x, y).
+    dir: (f32, f32),
+    /// Horizontal speed, m/s.
+    speed: f32,
+    /// Descent, m/s (positive).
+    descent: f32,
+    /// Bot clock the glide started.
+    started_ms: u64,
 }
+
+/// What the controller does besides walking its path: a GM teleport in flight, or a glide.
+#[derive(Debug, Default)]
+enum TripMode {
+    /// Nothing special.
+    #[default]
+    None,
+    /// Waiting for the server to move the bot after `/move`.
+    Teleport {
+        /// Bot clock after which the bot walks instead.
+        deadline_ms: u64,
+    },
+    /// Flying down a ledge (boxed: a `Motion` is part of every `Bot` and must stay small).
+    Glide(Box<Glide>),
+}
+
+/// Longest a glide may last, ms (the glide buff in the 1.2 data is 180 s; the bot is
+/// conservative).
+const MAX_GLIDE_MS: u64 = 30_000;
 
 /// The movement controller of one bot. See the module docs.
 #[derive(Debug)]
@@ -266,10 +294,14 @@ pub struct Motion {
     last_send_ms: u64,
     started_ms: u64,
     stuck: Stuck,
-    pending_tp: Option<PendingTeleport>,
+    mode: TripMode,
     /// Where the last `CSMoveUnit` (or the server's own placement) put the bot, as the server
     /// knows it.
     sent_pos: [f32; 3],
+    /// The object the movement packets name: the bot itself, or the mate it rides (a riding
+    /// player's own moves are ignored by the server, `world/session.rs:1191`; the client sends
+    /// the mount's object id instead).
+    move_obj: u32,
     /// Navigation mesh routes; `None`: every trip is the straight line.
     nav: Option<Box<NavState>>,
     /// Life-like movement (jumps, mannerisms, pauses; see [`super::manner`]); `None`: off.
@@ -295,8 +327,9 @@ impl Motion {
             last_send_ms: 0,
             started_ms: 0,
             stuck: Stuck::default(),
-            pending_tp: None,
+            mode: TripMode::None,
             sent_pos: [0.0; 3],
+            move_obj: 0,
             nav: None,
             life: None,
         }
@@ -321,6 +354,34 @@ impl Motion {
     /// The object id the controller moves (0 before the bot is in the world).
     pub fn obj(&self) -> u32 {
         self.obj
+    }
+
+    /// The object the movement packets name: the bot's own object id, or the mate it rides
+    /// (0 = the bot's own).
+    pub fn move_obj(&self) -> u32 {
+        if self.move_obj == 0 {
+            self.obj
+        } else {
+            self.move_obj
+        }
+    }
+
+    /// Moves the packets to the mate `obj` while the bot rides it, and back to the bot with 0.
+    pub fn set_move_obj(&mut self, obj: u32) {
+        let obj = if obj == self.obj { 0 } else { obj };
+        if self.move_obj != obj {
+            self.move_obj = obj;
+            self.force_send = true;
+        }
+    }
+
+    /// Puts the bot at `pos` without ending the trip (riding a mate shifts the rider to where the
+    /// mate stood).
+    pub fn set_position(&mut self, pos: [f32; 3]) {
+        if pos.iter().all(|v| v.is_finite()) {
+            self.pos = pos;
+            self.stuck.reset(self.last_tick_ms, pos);
+        }
     }
 
     /// Asks for an update that says where and how the bot stands (the stopped update that
@@ -350,7 +411,7 @@ impl Motion {
         if self.obj == 0
             || self.status == MotionStatus::Moving
             || self.stop_due
-            || self.pending_tp.is_some()
+            || !matches!(self.mode, TripMode::None)
             || life.jump.is_some()
             || !life.gate.show()
         {
@@ -437,6 +498,7 @@ impl Motion {
     /// Places the bot in the world (after the spawn): its object id, position and facing.
     pub fn enter_world(&mut self, obj: u32, pos: [f32; 3], yaw: f32, now_ms: u64) {
         self.obj = obj;
+        self.move_obj = obj;
         self.pos = pos;
         self.sent_pos = pos;
         self.yaw = yaw;
@@ -445,7 +507,7 @@ impl Motion {
         self.status = MotionStatus::Idle;
         self.moving_sent = false;
         self.stop_due = false;
-        self.pending_tp = None;
+        self.mode = TripMode::None;
         self.last_tick_ms = now_ms;
         self.life_reset();
     }
@@ -453,12 +515,13 @@ impl Motion {
     /// Takes the bot out of the world (disconnect).
     pub fn leave_world(&mut self) {
         self.obj = 0;
+        self.move_obj = 0;
         self.path.clear();
         self.nav_end(TripEnd::Cancelled);
         self.status = MotionStatus::Idle;
         self.moving_sent = false;
         self.stop_due = false;
-        self.pending_tp = None;
+        self.mode = TripMode::None;
         self.life_reset();
     }
 
@@ -534,6 +597,15 @@ impl Motion {
         now_ms: u64,
         counted: bool,
     ) {
+        // A goal that asks for the same trip again every tick must not cancel a glide.
+        if self.gliding()
+            && points.len() == 1
+            && self.path.len() == 1
+            && self.path[0] == points[0]
+            && (self.radius - radius).abs() < 0.01
+        {
+            return;
+        }
         let pace = self.life_pace(points, pace, counted, now_ms);
         if let Some(l) = self.life.as_deref_mut() {
             l.fidget.reset();
@@ -551,7 +623,7 @@ impl Motion {
         );
         self.radius = radius.max(0.0);
         self.pace = pace;
-        self.pending_tp = None;
+        self.mode = TripMode::None;
         self.started_ms = now_ms;
         self.stuck.reset(now_ms, self.pos);
         self.force_send = true;
@@ -599,9 +671,70 @@ impl Motion {
     /// bot instead of walking.
     pub fn begin_teleport(&mut self, now_ms: u64) {
         self.life_end_jump();
-        self.pending_tp = Some(PendingTeleport {
+        self.mode = TripMode::Teleport {
             deadline_ms: now_ms + TELEPORT_WAIT_MS,
-        });
+        };
+    }
+
+    /// Whether a GM `/move` waits for the server to move the bot.
+    pub fn teleporting(&self) -> bool {
+        matches!(self.mode, TripMode::Teleport { .. })
+    }
+
+    /// Whether the bot is gliding down a ledge.
+    pub fn gliding(&self) -> bool {
+        matches!(self.mode, TripMode::Glide(_))
+    }
+
+    /// Puts the walking and running speeds (the mount feature drives both while the bot rides).
+    pub fn set_speeds(&mut self, run: f32, walk: f32) {
+        if self.cfg.run_speed != run {
+            self.cfg.run_speed = run;
+        }
+        if self.cfg.walk_speed != walk {
+            self.cfg.walk_speed = walk;
+        }
+    }
+
+    /// Starts a glide along `dir` at `speed` m/s, descending `descent` m/s. The bot must be on a
+    /// trip; the caller has found the ledge ([`crate::bot::mount::plan::find_ledge`]). The glide
+    /// follows the fixed heading (it cuts the corner the navmesh would walk around) and ends when
+    /// the terrain meets the descent; the navmesh route is planned again from there.
+    pub fn begin_glide(&mut self, dir: (f32, f32), speed: f32, descent: f32, now_ms: u64) -> bool {
+        let len = dir.0.hypot(dir.1);
+        if self.obj == 0
+            || self.status != MotionStatus::Moving
+            || self.path.is_empty()
+            || self.nav.as_ref().is_some_and(|n| n.waiting())
+            || matches!(self.mode, TripMode::Teleport { .. })
+            || !len.is_finite()
+            || len < 0.9
+            || !speed.is_finite()
+            || speed <= 0.0
+            || !descent.is_finite()
+            || descent <= 0.0
+        {
+            return false;
+        }
+        self.life_end_jump();
+        self.mode = TripMode::Glide(Box::new(Glide {
+            dir: (dir.0 / len, dir.1 / len),
+            speed,
+            descent,
+            started_ms: now_ms,
+        }));
+        self.force_send = true;
+        self.stuck.reset(now_ms, self.pos);
+        true
+    }
+
+    /// Ends a glide without a landing packet (a death, a teleport, a new trip). The next ordinary
+    /// update puts the bot back on the ground.
+    pub fn end_glide(&mut self) {
+        if matches!(self.mode, TripMode::Glide(_)) {
+            self.mode = TripMode::None;
+            self.force_send = true;
+        }
     }
 
     /// Puts the bot at height `z` (it keeps its place on the map and its trip): the server hears
@@ -614,6 +747,7 @@ impl Motion {
         self.pos[2] = z;
         self.force_send = true;
         self.life_end_jump();
+        self.end_glide();
         if !self.is_moving() {
             self.stop_due = true;
         }
@@ -633,7 +767,7 @@ impl Motion {
             l.pause_until_ms = 0;
         }
         self.path.clear();
-        self.pending_tp = None;
+        self.mode = TripMode::None;
         self.status = MotionStatus::Idle;
         let pos = self.pos;
         if let Some(n) = self.nav.as_deref_mut() {
@@ -659,7 +793,9 @@ impl Motion {
         self.sent_pos = pos;
         self.life_reset();
         self.nav_end(TripEnd::Cancelled);
-        if self.pending_tp.take().is_some() {
+        let was_teleport = matches!(self.mode, TripMode::Teleport { .. });
+        self.mode = TripMode::None;
+        if was_teleport {
             if let Some(&(x, y)) = self.path.last() {
                 if dist2d(pos, [x, y, 0.0]) <= self.radius + 10.0 {
                     self.path.clear();
@@ -778,7 +914,7 @@ impl Motion {
             || !l.gate.show()
             || l.emotes.sitting
             || env.combat
-            || self.pending_tp.is_some()
+            || !matches!(self.mode, TripMode::None)
             || self.pos[2] == SWIM_Z
             || env.out.iter().any(range_checked)
         {
@@ -824,11 +960,15 @@ impl Motion {
         if self.obj == 0 {
             return self.status;
         }
-        if let Some(tp) = self.pending_tp {
-            if now < tp.deadline_ms {
-                return self.status; // waiting for SCTeleportUnit
+        match self.mode {
+            TripMode::Teleport { deadline_ms } => {
+                if now < deadline_ms {
+                    return self.status; // waiting for SCTeleportUnit
+                }
+                self.mode = TripMode::None;
             }
-            self.pending_tp = None;
+            TripMode::Glide(_) => return self.glide_tick(env, dt_ms),
+            TripMode::None => {}
         }
         if self.path.is_empty() {
             if self.stop_due {
@@ -1010,6 +1150,76 @@ impl Motion {
         env.out.push(packet);
     }
 
+    /// One tick of a glide: moves along the fixed heading and lets the descent meet the ground,
+    /// then continues the trip (with a fresh navmesh route from where it landed).
+    fn glide_tick(&mut self, env: &mut MotionEnv<'_>, dt_ms: u64) -> MotionStatus {
+        let now = env.now_ms;
+        let (dir, speed, descent, started_ms) = match &self.mode {
+            TripMode::Glide(g) => (g.dir, g.speed, g.descent, g.started_ms),
+            _ => return self.status,
+        };
+        let dt = dt_ms as f32 / 1000.0;
+        self.pos[0] += dir.0 * speed * dt;
+        self.pos[1] += dir.1 * speed * dt;
+        self.yaw = cs::yaw_towards((0.0, 0.0), dir);
+        let ground = env.ground.ground_z(self.pos[0], self.pos[1]);
+        let surface = ground.map(|g| surface_z(Some(g), self.pos[2]));
+        let next_z = self.pos[2] - descent * dt;
+        let land = match surface {
+            Some(z) => next_z <= z + 0.02,
+            // Without a ground under us, fall for three seconds and then settle.
+            None => now.saturating_sub(started_ms) >= 3_000,
+        };
+        let reached = self
+            .path
+            .last()
+            .is_some_and(|&(x, y)| dist2d(self.pos, [x, y, 0.0]) <= self.radius + 1.0);
+        if land || reached || now.saturating_sub(started_ms) >= MAX_GLIDE_MS {
+            if let Some(z) = surface {
+                self.pos[2] = z;
+            }
+            self.mode = TripMode::None;
+            self.stuck.reset(now, self.pos);
+            if reached {
+                self.path.clear();
+                self.status = MotionStatus::Arrived;
+            }
+            self.replan_after_glide(now);
+            self.force_send = true;
+            let moving = self.status == MotionStatus::Moving;
+            let vel = if moving {
+                (dir.0 * speed, dir.1 * speed)
+            } else {
+                (0.0, 0.0)
+            };
+            let packet = self.packet(now, env.combat, moving, vel, None);
+            env.out.push(packet);
+            return self.status;
+        }
+        self.pos[2] = next_z;
+        self.status = MotionStatus::Moving;
+        let due = self.force_send
+            || !self.moving_sent
+            || now.saturating_sub(self.last_send_ms) + SEND_SLACK_MS >= env.send_gap_ms.max(1);
+        if due {
+            let packet = self.packet(now, env.combat, true, (dir.0 * speed, dir.1 * speed), None);
+            env.out.push(packet);
+        }
+        self.status
+    }
+
+    /// After a glide the navmesh route belongs to the old place (it may have run around the
+    /// cliff): plan it again from where the bot landed, to the same goal.
+    fn replan_after_glide(&mut self, now_ms: u64) {
+        let Some(&(x, y)) = self.path.last() else {
+            return;
+        };
+        if let Some(n) = self.nav.as_deref_mut() {
+            n.end(TripEnd::Cancelled);
+            n.begin(self.pos, [x, y], self.radius, now_ms, false);
+        }
+    }
+
     /// Lets the navigation state move the bot for this tick. `None`: the straight line does.
     fn nav_step(&mut self, env: &MotionEnv<'_>, dt_ms: u64) -> Option<NavOutcome> {
         let (run, walk) = (self.speed(Pace::Run), self.speed(Pace::Walk));
@@ -1155,18 +1365,25 @@ impl Motion {
         air: Option<AirStep>,
     ) -> Out {
         let swimming = self.pos[2] == SWIM_Z;
-        let (lift, vz, jump) = air.map_or((0.0, 0.0, cs::JumpPhase::None), |a| {
-            (a.lift(), a.vz(), a.phase())
-        });
+        let gliding = self.gliding();
+        let (lift, vz, jump) = if let TripMode::Glide(g) = &self.mode {
+            (0.0, -g.descent, cs::JumpPhase::Air)
+        } else {
+            air.map_or((0.0, 0.0, cs::JumpPhase::None), |a| {
+                (a.lift(), a.vz(), a.phase())
+            })
+        };
         let z = self.pos[2] + lift;
         let packet = cs::move_unit(&MoveUnit {
-            obj: self.obj,
+            obj: self.move_obj(),
             time: now_ms as u32,
             pos: (self.pos[0], self.pos[1], z),
             vel: (vel.0, vel.1, vz),
             yaw: self.yaw,
             moving,
-            stance: if swimming {
+            stance: if gliding {
+                cs::STANCE_GLIDE
+            } else if swimming {
                 cs::STANCE_SWIM
             } else if combat {
                 cs::STANCE_COMBAT
@@ -1195,7 +1412,7 @@ impl Motion {
     /// updates of a walking bot are a second apart when nobody is near, which leaves the server
     /// metres behind. A standing bot gets a stopped update, a walking one a moving update.
     pub fn pin(&mut self, now_ms: u64, combat: bool) -> Option<Out> {
-        if self.obj == 0 || self.pending_tp.is_some() {
+        if self.obj == 0 || self.teleporting() || self.gliding() {
             return None;
         }
         // (a bot that waits for a search stands, although its trip is under way)

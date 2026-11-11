@@ -475,15 +475,10 @@ pub fn route(ev: &WorldEvent) -> Route {
         | WorldEvent::PortalSaved(_)
         | WorldEvent::PortalDeleted { .. }
         | WorldEvent::PortalUsed { .. } => Route::Travel,
-        // (the answers to the four portal skills: record, rename, open a gate, recall)
-        WorldEvent::SkillStarted {
-            skill:
-                aa_world::travel::portal::RECORD_PORTAL_SKILL
-                | aa_world::travel::portal::RENAME_PORTAL_SKILL
-                | aa_world::travel::portal::OPEN_PORTAL_SKILL
-                | aa_world::travel::portal::RECALL_SKILL,
-            ..
-        } => Route::Travel,
+        // (the travel state keeps the last skill answer of the bot: the portal skills and the
+        // mount / glider casts the mount feature checks)
+        WorldEvent::SkillStarted { .. } => Route::Travel,
+        WorldEvent::MateSpawned(_) => Route::Travel,
         WorldEvent::SlaveCreated { .. }
         | WorldEvent::MySlave(_)
         | WorldEvent::SlaveBound { .. }
@@ -682,7 +677,11 @@ impl BotState {
     fn apply_world(&mut self, ev: &WorldEvent) {
         match route(ev) {
             Route::Travel => return self.travel.on_event(ev, self.me.obj, self.now_ms),
-            Route::Vehicle => return self.vehicle.on_event(ev, self.me.obj),
+            Route::Vehicle => {
+                self.vehicle.on_event(ev, self.me.obj);
+                self.travel.on_vehicle_event(ev, self.me.obj, self.now_ms);
+                return;
+            }
             Route::Place | Route::Other => {}
         }
         match ev {
@@ -747,6 +746,7 @@ impl BotState {
                 }
             }
             WorldEvent::UnitMoved { obj, pos, .. } => {
+                self.travel.note_mate_moved(*obj, [pos.0, pos.1, pos.2]);
                 if let Some(u) = self.units.get_mut(obj) {
                     u.pos = [pos.0, pos.1, pos.2];
                 }
@@ -1085,6 +1085,15 @@ impl BotState {
                 self.check_alive();
             }
             return;
+        }
+        if info.unit_type == unit_type::MATE {
+            self.travel.note_mate_state(
+                info.obj,
+                info.tl_id,
+                info.owner_id,
+                self.me.char_id,
+                [info.pos.0, info.pos.1, info.pos.2],
+            );
         }
         let Some(kind) = UnitKind::from_wire(info.unit_type) else {
             return;
@@ -2000,7 +2009,7 @@ mod tests {
     }
 
     fn travel_events() -> Vec<WorldEvent> {
-        use aa_proto::sc_travel::PortalEntry;
+        use aa_proto::sc_travel::{MateInfo, PortalEntry};
         let entry = PortalEntry {
             id: 4,
             name: "Home".into(),
@@ -2019,6 +2028,23 @@ mod tests {
             WorldEvent::PortalSaved(Box::new(entry)),
             WorldEvent::PortalDeleted { kind: 0, id: 4 },
             WorldEvent::PortalUsed { gate: 0x500 },
+            WorldEvent::MateSpawned(Box::new(MateInfo {
+                tl: 5,
+                id: 9,
+                item_id: 77,
+                user_state: 1,
+                experience: 0,
+                mileage: 0,
+                spawn_delay_ms: 0,
+                skills: Box::default(),
+            })),
+            WorldEvent::SkillStarted {
+                caster_obj: 0x400,
+                skill: 10602,
+                tl: 1,
+                target_obj: 0x400,
+                result: 0,
+            },
         ]
     }
 

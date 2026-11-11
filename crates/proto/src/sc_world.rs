@@ -17,7 +17,7 @@ use smallvec::SmallVec;
 use crate::opcodes::{pp, sc};
 use crate::pos::convert_long_to_coord;
 use crate::sc_event::{self, EventId, TowerDefInfo};
-use crate::sc_travel::{self, MySlaveInfo, PortalEntry, ShipMotion};
+use crate::sc_travel::{self, MateInfo, MySlaveInfo, PortalEntry, ShipMotion};
 use crate::stream::{MarshalError, PacketStream};
 
 pub(crate) type Res<T> = Result<T, MarshalError>;
@@ -770,6 +770,11 @@ pub enum WorldEvent {
         gate: u32,
     },
 
+    // ---- mates (mounts and pets) -----------------------------------------------------------
+    /// `SCMateSpawnedPacket` (systems/vehicles/packets.rs:69, writer :579): a mate was summoned;
+    /// its unit state follows.
+    MateSpawned(Box<MateInfo>),
+
     // ---- slaves (boats) --------------------------------------------------------------------
     /// `SCSlaveCreatedPacket` (systems/vehicles/packets.rs:107): a slave was summoned; its
     /// `UnitState` follows.
@@ -1150,6 +1155,7 @@ fn game_reader(opcode: u16) -> Option<Reader> {
         sc::SCPortalDeletedPacket => sc_travel::read_portal_deleted,
         sc::SCUnitPortalUsedPacket => sc_travel::read_portal_used,
         // slaves
+        sc::SCMateSpawnedPacket => sc_travel::read_mate_spawned,
         sc::SCSlaveCreatedPacket => sc_travel::read_slave_created,
         sc::SCMySlavePacket => sc_travel::read_my_slave,
         sc::SCSlaveBoundPacket => sc_travel::read_slave_bound,
