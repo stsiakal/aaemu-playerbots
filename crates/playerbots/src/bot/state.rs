@@ -52,6 +52,27 @@ pub const U_OWNED: u8 = 4;
 /// Unit flag: the backpack slot of the character is occupied (a carried trade pack, a glider);
 /// the template is in [`PvpMem`] (`BotState::pack_of`).
 pub const U_PACK: u8 = 8;
+/// Unit flag: the first hit on this NPC was the bot's (the server's tag, and the quest credit,
+/// belongs to it and its party in looting range).
+pub const U_TAG_ME: u8 = 16;
+/// Unit flag: the first hit on this NPC was a party member's.
+pub const U_TAG_PARTY: u8 = 32;
+/// Unit flag: the first hit on this NPC was another character's: the server credits that tag,
+/// not the bot that lands the killing blow.
+pub const U_TAG_OTHER: u8 = 64;
+/// Mask of the three tag flags.
+pub const U_TAG_MASK: u8 = U_TAG_ME | U_TAG_PARTY | U_TAG_OTHER;
+
+/// Who the bot saw hit an NPC first (the server's tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagOwner {
+    /// The bot's own hit.
+    Me,
+    /// A member of the bot's party.
+    Party,
+    /// Another character.
+    Other,
+}
 
 /// What kind of unit the server shows. Houses, transfers, mates and shipyards are not tracked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +112,11 @@ pub struct Unit {
     pub faction: u32,
     /// Level.
     pub level: u8,
-    /// `U_DEAD | U_LOOT | U_OWNED | U_PACK`.
+    /// `U_DEAD | U_LOOT | U_OWNED | U_PACK | U_TAG_*`.
     pub flags: u8,
+    /// Object id of the unit's current target (`SCTargetChangedPacket`), 0 when none/unknown.
+    /// For an NPC this is who it is fighting.
+    pub target: u32,
     /// Name, characters only.
     pub name: Option<Box<str>>,
 }
@@ -116,6 +140,21 @@ impl Unit {
     /// Whether the character's backpack slot is occupied (see [`U_PACK`]).
     pub fn carries_pack(&self) -> bool {
         self.flags & U_PACK != 0
+    }
+
+    /// Who the bot saw hit this NPC first, `None` while it has seen no hit.
+    pub fn tag(&self) -> Option<TagOwner> {
+        match self.flags & U_TAG_MASK {
+            U_TAG_ME => Some(TagOwner::Me),
+            U_TAG_PARTY => Some(TagOwner::Party),
+            U_TAG_OTHER => Some(TagOwner::Other),
+            _ => None,
+        }
+    }
+
+    /// Whether another character (not the bot, not its party) holds the tag.
+    pub fn tagged_by_other(&self) -> bool {
+        self.tag() == Some(TagOwner::Other)
     }
 
     /// Horizontal distance to `p`.
@@ -546,6 +585,30 @@ impl BotState {
         self.units.get(&obj)
     }
 
+    /// Whether `char_id` is a member of the bot's party.
+    pub fn is_party_char(&self, char_id: u32) -> bool {
+        self.party
+            .as_ref()
+            .is_some_and(|p| p.team.in_team() && p.team.has(char_id))
+    }
+
+    /// Whether `obj` is a character of the bot's party (in view).
+    pub fn is_party_obj(&self, obj: u32) -> bool {
+        self.units
+            .get(&obj)
+            .is_some_and(|u| u.kind == UnitKind::Character && self.is_party_char(u.id))
+    }
+
+    /// Whether another character (not the bot, not its party) holds the tag of `obj`, or the
+    /// NPC is fighting one: a monster the bot should not expect quest credit for.
+    pub fn taken_by_other(&self, obj: u32) -> bool {
+        let Some(u) = self.units.get(&obj) else {
+            return false;
+        };
+        u.tagged_by_other()
+            || (u.target != 0 && u.target != self.me.obj && !self.is_party_obj(u.target))
+    }
+
     /// The template of the item in the backpack slot of character `obj` (a carried trade pack);
     /// 0 when the slot is empty or the character is not in view.
     pub fn pack_of(&self, obj: u32) -> u32 {
@@ -792,6 +855,23 @@ impl BotState {
                     }
                 }
             }
+            WorldEvent::UnitDamaged { caster, target } => {
+                // The first hit the bot sees is the server's tag: the tag decides quest credit,
+                // so a killing blow on a monster somebody else tagged is not counted as one.
+                let bit = if *caster == self.me.obj && self.me.obj != 0 {
+                    U_TAG_ME
+                } else if self.is_party_obj(*caster) {
+                    U_TAG_PARTY
+                } else {
+                    // (a character the bot cannot classify, or one out of view: not its tag)
+                    U_TAG_OTHER
+                };
+                if let Some(u) = self.units.get_mut(target) {
+                    if u.kind == UnitKind::Npc && u.tag().is_none() {
+                        u.flags |= bit;
+                    }
+                }
+            }
             WorldEvent::UnitDeath {
                 obj,
                 killer,
@@ -812,6 +892,9 @@ impl BotState {
                 }
             }
             WorldEvent::TargetChanged { obj, target } => {
+                if let Some(u) = self.units.get_mut(obj) {
+                    u.target = *target;
+                }
                 if let Some(mem) = self.party.as_mut() {
                     mem.team
                         .on_target(*obj, *target, self.me.obj, &self.units, self.now_ms);
@@ -1135,6 +1218,7 @@ impl BotState {
                 faction: info.faction_id,
                 level: info.level,
                 flags,
+                target: 0,
                 name: (kind == UnitKind::Character).then(|| info.name.clone()),
             },
         );
@@ -1520,6 +1604,18 @@ impl BotState {
                 quest: *quest_id,
                 err: *err,
             }),
+            ActivityEvent::QuestUnitReqFailed {
+                quest_id,
+                kind,
+                value,
+                ..
+            } => {
+                // (kept in the quest memory, not the error ring: the ring is inline per bot and
+                // a wider error entry would cost it 64 bytes)
+                let now = self.now_ms;
+                self.quest_mem.get_or_insert_with(Default::default).unit_req =
+                    Some((*quest_id, *kind, *value, now));
+            }
             ActivityEvent::MyHouse(h) => self.upsert_house(h),
             ActivityEvent::LoginCharInfoHouse { owner_id, house } => {
                 if *owner_id == self.me.char_id && self.me.char_id != 0 {
@@ -1681,6 +1777,54 @@ mod tests {
             500,
         )))));
         s
+    }
+
+    #[test]
+    fn the_first_hit_seen_decides_the_tag_and_a_target_marks_a_taken_monster() {
+        let mut s = in_world();
+        s.apply(&world(WorldEvent::UnitState(Box::new(unit_info(
+            0x700,
+            unit_type::NPC,
+            731,
+        )))));
+        // the bot hits first: its tag
+        s.apply(&world(WorldEvent::UnitDamaged {
+            caster: 0x400,
+            target: 0x700,
+        }));
+        assert_eq!(s.unit(0x700).unwrap().tag(), Some(TagOwner::Me));
+        assert!(!s.taken_by_other(0x700));
+        // a later hit by somebody else does not take it back
+        s.apply(&world(WorldEvent::UnitDamaged {
+            caster: 0x999,
+            target: 0x700,
+        }));
+        assert_eq!(s.unit(0x700).unwrap().tag(), Some(TagOwner::Me));
+
+        // another monster is hit by a stranger first: no credit for the bot
+        s.apply(&world(WorldEvent::UnitState(Box::new(unit_info(
+            0x701,
+            unit_type::NPC,
+            732,
+        )))));
+        s.apply(&world(WorldEvent::UnitDamaged {
+            caster: 0x999,
+            target: 0x701,
+        }));
+        assert_eq!(s.unit(0x701).unwrap().tag(), Some(TagOwner::Other));
+        assert!(s.taken_by_other(0x701));
+
+        // a monster that fights another character is taken too, one that fights the bot is not
+        s.apply(&world(WorldEvent::TargetChanged {
+            obj: 0x701,
+            target: 0x999,
+        }));
+        assert_eq!(s.unit(0x701).unwrap().target, 0x999);
+        s.apply(&world(WorldEvent::TargetChanged {
+            obj: 0x700,
+            target: 0x400,
+        }));
+        assert!(!s.taken_by_other(0x700));
     }
 
     #[test]

@@ -113,6 +113,14 @@ never when they can mint goods).
 
 ## Quest progression (`goals/quest/progress.rs`, `aa-world::quest_atlas`)
 
+Kills and NPC reach follow the server. The server credits a kill to the player that tagged the
+monster first (its party instead once the party did more than half of its health), so the bots
+read the first hit from the broadcast `SCUnitDamaged` packets and prefer monsters nobody else
+tagged; a killing blow on somebody else's tag no longer expects (or reports) quest credit. A
+quest request is measured in 3D by the server (15 m at an NPC, 20 m at a doodad): the goals walk
+to the target's own floor through the navigation mesh (the search is asked for the NPC's z) and
+report a target on an unreachable floor instead of stopping below it.
+
 The quest picker looks for a giver within 300 m, then within 1500 m. A bot that has done everything
 in that circle used to stay there (grinding and wandering filled in), so the Harani and Firran
 hand-off from Villanelle to the Silent Forest, 2 km apart, never happened. Now a bot whose scan

@@ -305,6 +305,7 @@ fn grinding_fights_a_monster_in_view_and_loots_it() {
             faction: 0,
             level,
             flags: 0,
+            target: 0,
             name: None,
         },
     );
@@ -553,6 +554,7 @@ fn a_trade_run_only_fights_back_against_close_attackers() {
                 faction: 0,
                 level,
                 flags: 0,
+                target: 0,
                 name: None,
             },
         );
@@ -645,6 +647,7 @@ fn place_mob(rig: &mut Rig, template: u32, obj: u32, dx: f32) {
             faction: 0,
             level,
             flags: 0,
+            target: 0,
             name: None,
         },
     );
@@ -910,6 +913,7 @@ fn start_duel(rig: &mut Rig, foe: u32) {
             faction: rig.state.me.faction,
             level: 1,
             flags: 0,
+            target: 0,
             name: Some("Foe".into()),
         },
     );
@@ -1330,6 +1334,7 @@ fn trade_request_from(rig: &mut Rig, obj: u32, char_id: u32) {
             faction: rig.state.me.faction,
             level: 1,
             flags: 0,
+            target: 0,
             name: Some("Visitor".into()),
         },
     );

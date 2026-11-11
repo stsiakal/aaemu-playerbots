@@ -589,6 +589,15 @@ pub enum WorldEvent {
         /// Mana (real value).
         mp: i32,
     },
+    /// `SCUnitDamagedPacket` (systems/skills/packets.rs:334): a landed hit, broadcast to the
+    /// players around the target. The bot reads who hit whom to know the first hitter of a
+    /// monster (the server credits the tag, not the killing blow).
+    UnitDamaged {
+        /// Object id of the caster.
+        caster: u32,
+        /// Object id of the unit that took the hit.
+        target: u32,
+    },
     /// `SCUnitDeathPacket` (systems/skills/packets.rs:394).
     UnitDeath {
         /// Dead unit.
@@ -1126,6 +1135,7 @@ fn game_reader(opcode: u16) -> Option<Reader> {
         sc::SCOneUnitMovementPacket => read_unit_moved,
         sc::SCTeleportUnitPacket => read_teleport_unit,
         sc::SCUnitPointsPacket => read_unit_points,
+        sc::SCUnitDamagedPacket => read_unit_damaged,
         sc::SCUnitDeathPacket => read_unit_death,
         sc::SCCharacterResurrectedPacket => read_resurrected,
         sc::SCNotifyResurrectionPacket => |s| {
@@ -1912,6 +1922,33 @@ fn read_unit_points(s: &mut PacketStream) -> Res<Option<WorldEvent>> {
     let hp = s.read_i32()? / POINTS_SCALE;
     let mp = s.read_i32()? / POINTS_SCALE;
     some(WorldEvent::UnitPoints { obj, hp, mp })
+}
+
+/// `SCUnitDamagedPacket` (systems/skills/packets.rs:334-389): `CastAction`, `SkillCaster`,
+/// 3-byte caster and target object ids, crime state, two PISC groups and the hit tail. The bot
+/// only needs who hit whom; the rest is skipped with the widths of the server writer.
+fn read_unit_damaged(s: &mut PacketStream) -> Res<Option<WorldEvent>> {
+    match s.read_u8()? {
+        0 => skip(s, 6)?,  // CastSkill: skill id, tl id
+        1 => skip(s, 14)?, // CastPlot
+        2 => skip(s, 13)?, // CastBuff
+        3 => skip(s, 11)?, // CastUnk2
+        4 => skip(s, 7)?,  // CastUnk3
+        other => return invalid(format!("CastAction {other} out of range")),
+    }
+    match s.read_u8()? {
+        0 | 1 | 4 => skip(s, 3)?, // unit, unk1, doodad object id
+        2 => {
+            // item: object id then item id, template, type1, type2
+            skip(s, 3 + 8 + 4 + 1 + 4)?;
+        }
+        3 => skip(s, 3 + 4)?, // mount: object id, mount skill template
+        other => return invalid(format!("SkillCasterType {other} out of range")),
+    }
+    let caster = s.read_bc()?;
+    let target = s.read_bc()?;
+    skip(s, 1 + 3 + 3 + 5)?; // crime state, damage/absorbed/mana PISC groups, hit tail
+    some(WorldEvent::UnitDamaged { caster, target })
 }
 
 fn read_unit_death(s: &mut PacketStream) -> Res<Option<WorldEvent>> {
