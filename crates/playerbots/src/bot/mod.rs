@@ -865,6 +865,11 @@ impl Bot {
             }
             other => other,
         };
+        // A pack carrier does not take a coordinator pairing (a duel or a party could take it
+        // into a fight); the operator's explicit goals are still obeyed.
+        let pack_busy =
+            goals::trade_run::carried_pack_in(&self.shared.world, &self.state.equipment).is_some()
+                || self.state.econ.lost_pack().is_some();
         match &cmd {
             BotCmd::Pause => {
                 self.paused = true;
@@ -881,6 +886,10 @@ impl Bot {
             BotCmd::DuelWith(other) => self.pair_with(*other, PairKind::Duel),
             BotCmd::TradeWith(other) => self.pair_with(*other, PairKind::Trade),
             BotCmd::ServerLogLine { level, line } => self.on_server_log_line(*level, line),
+            BotCmd::Pair(_) | BotCmd::Party(_) if pack_busy => {
+                self.log
+                    .say("carrying a trade pack; not taking a pairing or party");
+            }
             BotCmd::Goal(_) | BotCmd::GoalWith { .. } | BotCmd::Pair(_) | BotCmd::Party(_) => {
                 self.brain.command(&cmd)
             }
@@ -904,6 +913,13 @@ impl Bot {
 
     /// The operator asked this bot to duel or trade with bot `other`.
     fn pair_with(&mut self, other: u32, kind: PairKind) {
+        if goals::trade_run::carried_pack_in(&self.shared.world, &self.state.equipment).is_some()
+            || self.state.econ.lost_pack().is_some()
+        {
+            self.log
+                .say("carrying a trade pack; not starting a duel or trade");
+            return;
+        }
         let (partner_char, partner_name) = coordinator::Dispatch::who(&*self.shared.hub, other);
         let pos = self.state.me.pos;
         let order = PairOrder {
@@ -1072,12 +1088,29 @@ impl Bot {
             self.motion.stop();
             self.combat.reset();
             self.log.say("died");
+            if r.pack_dropped {
+                self.log
+                    .say("died carrying a trade pack; it is on the ground where the bot died");
+            }
         }
         if let Some(p) = r.resurrected {
             self.motion.teleported(p);
             self.next_rez_ms = 0;
             if !self.brain.in_dungeon_run() {
-                self.brain.queue(GoalKind::Rest, None);
+                // A dropped pack is gone back for at once (the run rests first if the bot is
+                // still weak); everything else rests as before.
+                let lost = self.state.econ.lost_pack();
+                let recover =
+                    lost.is_some_and(|p| !self.shared.world.specialty_buyers(p.item).is_empty());
+                if recover {
+                    self.brain.queue(GoalKind::TradeRun, None);
+                } else {
+                    if lost.is_some() {
+                        // (the back slot held a glider, not a trade pack)
+                        self.state.econ.clear_lost_pack();
+                    }
+                    self.brain.queue(GoalKind::Rest, None);
+                }
             }
             self.log.say("resurrected");
         }

@@ -81,7 +81,7 @@ instead (see [LLM control and the agent API](#llm-control-and-the-agent-api)).
 | Grind | Kill level-appropriate hostile NPCs near the bot (fallback when no quest is eligible). |
 | Duel | Coordinator pairs two idle bots; they meet, challenge/accept, fight with their PvP rotation, end on the server's `SCDuelEnded`. |
 | Trade | Coordinator pairs two bots; they meet, open a trade window, put up an item and/or money, lock, confirm. |
-| Trade run | Walk to a specialty workbench, craft a trade pack (`CSExecuteCraft`), carry it to a specialty NPC that buys it, sell (`CSSellBackpackGoods`), collect the payment mail. |
+| Trade run | Walk to a specialty workbench, craft a trade pack (`CSExecuteCraft`), carry it to a specialty NPC that buys it, sell (`CSSellBackpackGoods`), collect the payment mail. A run starts only at 80 % hit points and skips routes through areas far above the bot's level or zones of the hostile alliance. While the pack is carried the run is the only goal (no event, quest, duel, dungeon or other fight, and no portal the pack buff blocks); a bot that dies with the pack goes back to the death spot for the dropped doodad and only writes the pack off when it is gone (logged, and counted in `Ledger::packs_lost`). |
 | Housing | Get a design (and tax certificates), walk to a free spot inside a housing area, quote (`CSConstructHouseTax`) and place (`CSCreateHouse`); later "go home" when resting. |
 | Farm | Buy seeds, plant them on own land or a public farm, remember the plots, come back when they are ripe, harvest and replant; grows what the population director wishes for or the economy board calls scarce (see [Farming](#farming-botfarm-goal-farm)). |
 | Rest | Stand still out of combat until HP/MP recover. |

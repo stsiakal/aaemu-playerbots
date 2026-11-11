@@ -363,6 +363,8 @@ pub struct Reactions {
     pub resurrected: Option<[f32; 3]>,
     /// The bot died.
     pub died: bool,
+    /// The bot died with a trade pack in the back slot: it is a doodad at the death spot now.
+    pub pack_dropped: bool,
     /// `SCKicked` with its reason and message.
     pub kicked: Option<(u8, Box<str>)>,
     /// `SCLeaveWorldGranted`: the server lets the bot log out.
@@ -513,9 +515,15 @@ impl BotState {
             g.after_reset();
             g
         });
+        // (a pack dropped at a death spot is a doodad in the world, not a connection fact: the
+        // bot still has to go back for it after a reconnect)
+        let lost_pack = self.econ.lost_pack();
         *self = BotState::default();
         self.vehicle.restore_trip_log(trips);
         self.gear = gear;
+        if let Some(lost) = lost_pack {
+            self.econ.restore_lost_pack(lost);
+        }
     }
 
     /// The gear memory, allocated on first use.
@@ -1158,6 +1166,7 @@ impl BotState {
 
     fn apply_death(&mut self, obj: u32, killer: u32, respawn_wait_ms: i32) {
         if obj == self.me.obj && self.me.obj != 0 {
+            let was_dead = self.me.dead;
             self.me.dead = true;
             self.me.hp = 0;
             let wait = u64::try_from(respawn_wait_ms).unwrap_or(0).max(1000);
@@ -1166,6 +1175,25 @@ impl BotState {
             self.threats.clear();
             self.watch.death.death_packet();
             self.watch.tracker.clear();
+            // The server drops the equipped trade pack as a doodad at this spot right after the
+            // death packet (`Character.DropTradePackToFloor`), before the item task removes it
+            // from the back slot: remember where to look for it after the resurrection.
+            if !was_dead {
+                let backpack = self
+                    .equipment
+                    .iter()
+                    .find(|e| e.slot == aa_proto::sc_world::BACKPACK_SLOT)
+                    .map_or(0, |e| e.template);
+                if backpack != 0 {
+                    self.econ.note_death_with_pack(
+                        backpack,
+                        self.me.pos,
+                        self.place.instance_id(),
+                        self.now_ms,
+                    );
+                    self.reactions.pack_dropped = true;
+                }
+            }
             if self
                 .units
                 .get(&killer)
@@ -1833,6 +1861,57 @@ mod tests {
             reason: 0,
         }));
         assert_eq!(s.me.respawn_at_ms, 2000);
+    }
+
+    #[test]
+    fn dying_with_a_pack_remembers_the_spot_to_look_for_it() {
+        let mut s = in_world();
+        s.now_ms = 5_000;
+        s.me.pos = [100.0, 200.0, 300.0];
+        s.equipment.push(EquipSlot {
+            slot: aa_proto::sc_world::BACKPACK_SLOT,
+            template: 31_855,
+            id: 77,
+            grade: 0,
+        });
+        s.apply(&world(WorldEvent::UnitDeath {
+            obj: 0x400,
+            killer: 0,
+            respawn_wait_ms: 5_000,
+            lost_exp: 0,
+            reason: 0,
+        }));
+        let lost = s.econ.lost_pack().expect("the dropped pack is noted");
+        assert_eq!(
+            (lost.item, lost.pos, lost.inst),
+            (31_855, [100.0, 200.0, 300.0], 0)
+        );
+        assert!(std::mem::take(&mut s.reactions.pack_dropped));
+        // a second death packet does not move the spot or reset the timer
+        s.now_ms = 9_000;
+        s.apply(&world(WorldEvent::UnitDeath {
+            obj: 0x400,
+            killer: 0,
+            respawn_wait_ms: 5_000,
+            lost_exp: 0,
+            reason: 0,
+        }));
+        assert_eq!(s.econ.lost_pack(), Some(lost));
+        assert!(!std::mem::take(&mut s.reactions.pack_dropped));
+        // a reconnect keeps the note: the doodad is still in the world
+        s.reset();
+        assert_eq!(s.econ.lost_pack(), Some(lost));
+        // a death without a pack leaves no note
+        let mut s = in_world();
+        s.apply(&world(WorldEvent::UnitDeath {
+            obj: 0x400,
+            killer: 0,
+            respawn_wait_ms: 5_000,
+            lost_exp: 0,
+            reason: 0,
+        }));
+        assert!(s.econ.lost_pack().is_none());
+        assert!(!std::mem::take(&mut s.reactions.pack_dropped));
     }
 
     #[test]

@@ -583,6 +583,54 @@ fn a_trade_run_only_fights_back_against_close_attackers() {
     );
 }
 
+#[test]
+#[ignore = "needs AA_COMPACT and AA_SERVER_DATA (real server data)"]
+fn a_carrier_in_a_rest_only_fights_close_attackers() {
+    let Some(world) = world() else {
+        eprintln!("AA_COMPACT / AA_SERVER_DATA not set; skipping");
+        return;
+    };
+    // any trade pack: the back slot is what makes the bot a carrier
+    let pack = world
+        .pack_crafts()
+        .map(|c| c.product.0)
+        .next()
+        .expect("a pack craft");
+    let mut rig = Rig::new(world.clone(), "Darkrunner", 7);
+    rig.state.equipment.push(EquipSlot {
+        slot: 26,
+        template: pack,
+        id: 77,
+        grade: 0,
+    });
+    rig.brain.queue(GoalKind::Rest, None);
+    for _ in 0..4 {
+        rig.tick(250);
+    }
+    assert_eq!(rig.brain.goal_name(), "rest");
+
+    let template = weak_hostile(&world, rig.state.me.faction);
+    let mob = 0x901;
+    let attack_from = |rig: &mut Rig, dx: f32| {
+        place_mob(rig, template, mob, dx);
+        let now = rig.now_ms;
+        rig.state.threats.clear();
+        rig.state.threats.push((mob, now));
+    };
+    // standing (rest) with a pack: a far attacker is not chased
+    attack_from(&mut rig, 40.0);
+    rig.tick(250);
+    assert_eq!(
+        rig.combat.target(),
+        None,
+        "a carrier does not chase a far attacker"
+    );
+    // a close one is fought back
+    attack_from(&mut rig, 8.0);
+    rig.tick(250);
+    assert_eq!(rig.combat.target(), Some(mob));
+}
+
 /// A monster of `template` in view, `dx` metres east of the bot and not hurt by anything.
 fn place_mob(rig: &mut Rig, template: u32, obj: u32, dx: f32) {
     let level = rig.world.npc(template).unwrap().level;
