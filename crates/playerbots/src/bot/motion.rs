@@ -1238,7 +1238,7 @@ impl Motion {
         };
         if let Some(n) = self.nav.as_deref_mut() {
             n.end(TripEnd::Cancelled);
-            n.begin(self.pos, [x, y], self.radius, now_ms, false);
+            n.begin(self.pos, [x, y], None, self.radius, now_ms, false);
         }
     }
 
