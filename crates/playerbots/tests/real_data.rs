@@ -436,7 +436,7 @@ fn forcing_a_travel_goal_the_bot_cannot_do_now_does_no_harm() {
 
 #[test]
 #[ignore = "needs AA_COMPACT and AA_SERVER_DATA (real server data)"]
-fn a_rest_that_cut_a_trade_run_short_gives_it_back_while_a_pack_is_carried() {
+fn a_hurt_pack_carrier_does_not_leave_the_trade_run_for_a_rest() {
     let Some(world) = world() else {
         eprintln!("AA_COMPACT / AA_SERVER_DATA not set; skipping");
         return;
@@ -479,22 +479,17 @@ fn a_rest_that_cut_a_trade_run_short_gives_it_back_while_a_pack_is_carried() {
         "the run carries the pack"
     );
 
-    // badly hurt: the brain rests instead
+    // badly hurt: a carrier does not leave the run for a rest in the open (the run itself rests
+    // to 80 % before it plans and crafts, and a pack that stands still is no safer on the road)
     rig.state.me.hp = 200;
-    rig.tick(250);
-    assert_eq!(rig.brain.goal_name(), "rest");
-    // recovered: the rest ends after its ten seconds and the run goes on
-    rig.state.me.hp = 1000;
-    let mut resumed_after = None;
-    for i in 0..(100 * 4) {
+    for _ in 0..16 {
         rig.tick(250);
-        if rig.brain.goal_name() == "trade_run" {
-            resumed_after = Some(i * 250);
-            break;
-        }
+        assert_eq!(
+            rig.brain.goal_name(),
+            "trade_run",
+            "a hurt carrier keeps the run"
+        );
     }
-    let ms = resumed_after.expect("the rest gave the trade run back");
-    assert!(ms >= 9_000, "after the minimum rest, not at once: {ms} ms");
 }
 
 #[test]

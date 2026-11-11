@@ -253,6 +253,9 @@ struct Glide {
     descent: f32,
     /// Bot clock the glide started.
     started_ms: u64,
+    /// The ground has fallen away from under the bot (it is in the air). A glide starts a step
+    /// or two before the edge: until then the bot runs along the heading on the ground.
+    airborne: bool,
 }
 
 /// What the controller does besides walking its path: a GM teleport in flight, or a glide.
@@ -273,6 +276,11 @@ enum TripMode {
 /// Longest a glide may last, ms (the glide buff in the 1.2 data is 180 s; the bot is
 /// conservative).
 const MAX_GLIDE_MS: u64 = 30_000;
+/// How long a glide may run along the ground before the ground falls away; past it the glide
+/// ends as a landing (the edge was not there), ms.
+const GLIDE_RUN_UP_MS: u64 = 2_000;
+/// Height above the ground from which the bot counts as airborne (metres).
+const GLIDE_AIRBORNE_M: f32 = 0.5;
 
 /// The movement controller of one bot. See the module docs.
 #[derive(Debug)]
@@ -744,6 +752,7 @@ impl Motion {
             speed,
             descent,
             started_ms: now_ms,
+            airborne: false,
         }));
         self.force_send = true;
         self.stuck.reset(now_ms, self.pos);
@@ -1176,8 +1185,8 @@ impl Motion {
     /// then continues the trip (with a fresh navmesh route from where it landed).
     fn glide_tick(&mut self, env: &mut MotionEnv<'_>, dt_ms: u64) -> MotionStatus {
         let now = env.now_ms;
-        let (dir, speed, descent, started_ms) = match &self.mode {
-            TripMode::Glide(g) => (g.dir, g.speed, g.descent, g.started_ms),
+        let (dir, speed, descent, started_ms, was_airborne) = match &self.mode {
+            TripMode::Glide(g) => (g.dir, g.speed, g.descent, g.started_ms, g.airborne),
             _ => return self.status,
         };
         let dt = dt_ms as f32 / 1000.0;
@@ -1186,8 +1195,19 @@ impl Motion {
         self.yaw = cs::yaw_towards((0.0, 0.0), dir);
         let ground = env.ground.ground_z(self.pos[0], self.pos[1]);
         let surface = ground.map(|g| surface_z(Some(g), self.pos[2]));
+        // The glide starts a step or two before the edge, on the ground: the bot keeps to the
+        // ground until it falls away from under it and only then descends. (Landing on the first
+        // tick of a start on level ground would end every glide before the edge.)
+        let airborne = was_airborne || surface.is_some_and(|z| self.pos[2] > z + GLIDE_AIRBORNE_M);
+        if airborne && !was_airborne {
+            if let TripMode::Glide(g) = &mut self.mode {
+                g.airborne = true;
+            }
+        }
+        let run_up = !airborne && now.saturating_sub(started_ms) < GLIDE_RUN_UP_MS;
         let next_z = self.pos[2] - descent * dt;
         let land = match surface {
+            Some(_) if run_up => false,
             Some(z) => next_z <= z + 0.02,
             // Without a ground under us, fall for three seconds and then settle.
             None => now.saturating_sub(started_ms) >= 3_000,
@@ -1218,7 +1238,11 @@ impl Motion {
             env.out.push(packet);
             return self.status;
         }
-        self.pos[2] = next_z;
+        // (on the ground during the run-up, descending once the ground has fallen away)
+        self.pos[2] = match surface {
+            Some(z) if !airborne => z,
+            _ => next_z,
+        };
         self.status = MotionStatus::Moving;
         let due = self.force_send
             || !self.moving_sent
@@ -1237,8 +1261,10 @@ impl Motion {
             return;
         };
         if let Some(n) = self.nav.as_deref_mut() {
+            // (the trip may have been asked for a floor: the new one keeps it)
+            let goal_z = n.goal_z();
             n.end(TripEnd::Cancelled);
-            n.begin(self.pos, [x, y], None, self.radius, now_ms, false);
+            n.begin(self.pos, [x, y], goal_z, self.radius, now_ms, false);
         }
     }
 
@@ -1475,8 +1501,8 @@ impl Motion {
 
 /// Whether the server checks the distance between the bot and something for this packet: casts
 /// (`TOO_FAR`), opening and emptying a loot window (5 m), talking to an NPC or doodad, quest
-/// steps, crafting at a bench, selling a trade pack (2.5 m), buying from a merchant (3 m) and
-/// planting a seed (30 m).
+/// steps, crafting at a bench, selling a trade pack (2.5 m), buying from a merchant (3 m),
+/// planting a seed (30 m) and boarding a mate (6 m).
 pub fn range_checked(p: &Out) -> bool {
     p.level == LEVEL_GAME
         && matches!(
@@ -1493,6 +1519,7 @@ pub fn range_checked(p: &Out) -> bool {
                 | op::CSSellBackpackGoodsPacket
                 | op::CSBuyItemsPacket
                 | op::CSCreateDoodadPacket
+                | op::CSMountMatePacket
         )
 }
 
@@ -1762,6 +1789,17 @@ mod tests {
         out.push(cs::start_skill_unit(18132, 0x400, 9));
         assert!(range_checked(&out[2]) && range_checked(&out[3]));
         assert!(!range_checked(&out[0]) && !range_checked(&out[1]));
+        // boarding a mate is judged by the server against the position it last heard (6 m)
+        assert!(range_checked(&cs::mount_mate(
+            7,
+            1,
+            cs::MOUNT_REASON_FORWARD
+        )));
+        assert!(!range_checked(&cs::unmount_mate(
+            7,
+            1,
+            cs::MOUNT_REASON_FORWARD
+        )));
         pin_before_range_checked(&mut rig.motion, &mut out, from, rig.now, false);
         assert_eq!(out.len(), 5);
         assert_eq!(out[2], stopped_here(&rig), "right before the loot request");

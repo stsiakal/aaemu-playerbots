@@ -337,6 +337,7 @@ fn a_glider_is_equipped_and_deployed_from_a_ledge() {
         dir: (0.0, 1.0),
         ground: 100.0,
         drop_m: 100.0,
+        edge_m: 2.0,
     });
     assert_eq!(
         step(&mut mem, &ledge)[0],
@@ -359,6 +360,7 @@ fn no_glide_without_a_worn_glider_a_ledge_or_a_long_trip() {
         dir: (0.0, 1.0),
         ground: 100.0,
         drop_m: 100.0,
+        edge_m: 2.0,
     });
     for (name, mut f) in [
         ("no glider", {
@@ -545,6 +547,152 @@ fn a_glide_descends_lands_and_continues_the_trip() {
     assert!(!m.gliding(), "the glide must end");
     assert!(glide_packet, "the updates must carry the glide stance");
     assert_eq!(m.status(), MotionStatus::Moving);
+}
+
+/// Level ground at 200 m up to y = 5, then a cliff down to 150 m.
+struct Cliff;
+
+impl Ground for Cliff {
+    fn ground_z(&self, _x: f32, y: f32) -> Option<f32> {
+        Some(if y < 5.0 { 200.0 } else { 150.0 })
+    }
+}
+
+/// Ticks a glide of a bot standing at (0, 0, `z`) every 100 ms for up to `ticks`, until it ends.
+/// Returns the heights and the y positions reached, and whether the glide is still on.
+fn run_glide(ground: &dyn Ground, z: f32, ticks: u64) -> (Vec<f32>, Vec<f32>, bool, Motion) {
+    let mut m = Motion::new(MotionCfg::default());
+    m.enter_world(0x400, [0.0, 0.0, z], 0.0, 1_000);
+    m.go_to(0.0, 1000.0, 0.0, Pace::Run, 1_000);
+    assert!(m.begin_glide((0.0, 1.0), 9.0, 3.0, 1_000));
+    let mut out = Vec::new();
+    let mut rng = fastrand::Rng::with_seed(7);
+    let (mut zs, mut ys) = (Vec::new(), Vec::new());
+    for i in 1..=ticks {
+        let mut env = MotionEnv {
+            ground,
+            now_ms: 1_000 + i * 100,
+            out: &mut out,
+            rng: &mut rng,
+            send_gap_ms: 100,
+            combat: false,
+        };
+        m.tick(&mut env);
+        zs.push(m.pos()[2]);
+        ys.push(m.pos()[1]);
+        out.clear();
+        if !m.gliding() {
+            break;
+        }
+    }
+    let on = m.gliding();
+    (zs, ys, on, m)
+}
+
+#[test]
+fn a_glide_that_starts_before_the_edge_runs_on_the_ground_and_then_descends() {
+    // The bot stands on the level ground 4 m before the edge (the glide starts within
+    // `GLIDE_START_EDGE_M`): one tick moves it less than the distance, so it must not land.
+    let mut m = Motion::new(MotionCfg::default());
+    m.enter_world(0x400, [0.0, 1.0, 200.0], 0.0, 1_000);
+    m.go_to(0.0, 1000.0, 0.0, Pace::Run, 1_000);
+    assert!(m.begin_glide((0.0, 1.0), 9.0, 3.0, 1_000));
+    let mut out = Vec::new();
+    let mut rng = fastrand::Rng::with_seed(7);
+    let cliff = Cliff;
+    let mut zs = Vec::new();
+    for i in 1..=400u64 {
+        let mut env = MotionEnv {
+            ground: &cliff,
+            now_ms: 1_000 + i * 100,
+            out: &mut out,
+            rng: &mut rng,
+            send_gap_ms: 100,
+            combat: false,
+        };
+        m.tick(&mut env);
+        zs.push((m.pos()[1], m.pos()[2]));
+        out.clear();
+        if !m.gliding() {
+            break;
+        }
+    }
+    // on the ground (not sunk into it) while it runs up to the edge ...
+    let before_edge: Vec<_> = zs.iter().filter(|(y, _)| *y < 5.0).collect();
+    assert!(!before_edge.is_empty());
+    assert!(
+        before_edge.iter().all(|(_, z)| *z == 200.0),
+        "run-up heights {before_edge:?}"
+    );
+    // ... then it flies down, lands on the lower ground and the trip goes on
+    assert!(zs.iter().any(|(_, z)| *z < 199.0 && *z > 151.0), "no glide");
+    assert!(!m.gliding(), "the glide must end");
+    assert!((m.pos()[2] - 150.0).abs() < 0.1, "landed at {}", m.pos()[2]);
+    assert_eq!(m.status(), MotionStatus::Moving);
+}
+
+#[test]
+fn a_glide_with_no_edge_ahead_ends_as_a_landing_after_the_run_up() {
+    // level ground all the way: the bot runs on the ground, then the glide ends on its own
+    let (zs, _, on, m) = run_glide(&Valley, 200.0, 100);
+    assert!(!on, "the glide must end when the edge is not there");
+    assert!(zs.iter().all(|z| *z == 200.0), "it never leaves the ground");
+    assert_eq!(m.pos()[2], 200.0);
+    assert_eq!(m.status(), MotionStatus::Moving);
+}
+
+#[test]
+fn a_ledge_far_ahead_does_not_start_a_glide_until_the_edge_is_close() {
+    let r = test_rules();
+    let mut mem = Mem::default();
+    let mut f = facts(T0, r);
+    f.glider_item = None;
+    f.glider_equipped = Some(item(GLIDER, 12373));
+    f.ledge = Some(Ledge {
+        dir: (0.0, 1.0),
+        ground: 100.0,
+        drop_m: 100.0,
+        edge_m: GLIDE_START_EDGE_M + 2.0,
+    });
+    let glides = |acts: &[Act]| acts.iter().any(|a| matches!(a, Act::Glide { .. }));
+    assert!(!glides(&step(&mut mem, &f)), "the edge is still far");
+    f.now_ms = T0 + 500;
+    f.ledge = f.ledge.map(|l| Ledge {
+        edge_m: GLIDE_START_EDGE_M,
+        ..l
+    });
+    assert!(glides(&step(&mut mem, &f)), "the edge is close enough");
+}
+
+#[test]
+fn an_unanswered_dismount_is_not_sent_again_every_few_seconds() {
+    let r = test_rules();
+    let mut mem = Mem {
+        mate_tl: 5,
+        phase: Phase::Mounted { since_ms: T0 },
+        ..Mem::default()
+    };
+    let mut f = facts(T0, r);
+    f.combat = true; // a fight: the bot has to get off
+    assert!(matches!(step(&mut mem, &f)[..], [Act::Dismount { .. }]));
+    // the server never answers: the wait ends and the bot is "mounted" again ...
+    f.now_ms = T0 + DISMOUNT_WAIT_MS;
+    assert!(step(&mut mem, &f).is_empty());
+    assert!(matches!(mem.phase, Phase::Mounted { .. }));
+    // ... but the request is not repeated at once
+    f.now_ms += 1_000;
+    assert!(step(&mut mem, &f).is_empty(), "no retry loop");
+    f.now_ms = T0 + DISMOUNT_WAIT_MS + DISMOUNT_RETRY_MS;
+    assert!(matches!(step(&mut mem, &f)[..], [Act::Dismount { .. }]));
+}
+
+#[test]
+fn find_ledge_reports_the_distance_to_the_edge() {
+    // level ground, then a cliff at y = 9: the first sample past the edge is 10 m ahead
+    let ground = |_x: f32, y: f32| Some(if y < 9.0 { 200.0 } else { 100.0 });
+    let l = find_ledge(ground, [0.0, 0.0, 200.0], 0.0, 30.0, 8.0).expect("a ledge");
+    assert_eq!(l.edge_m, 10.0);
+    assert_eq!(l.dir, (0.0, 1.0));
 }
 
 #[test]

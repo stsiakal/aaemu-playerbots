@@ -301,7 +301,8 @@ pub struct DungeonsCfg {
     /// entry limit (`Dungeons.EntryLimit`). A refusal for the limit is answered either way.
     pub entry_limit: bool,
     /// Seconds a wish waits for a full party (the dungeon's `max_players`, at most five) before
-    /// it goes with a smaller one. At most 600; the bot waits up to
+    /// it goes with a smaller one. At most
+    /// [`MAX_RELAX_SECS`](crate::bot::coordinator::MAX_RELAX_SECS); the bot waits up to
     /// [`GATHER_MS`](crate::bot::goals::dungeon::machine::GATHER_MS) for an order.
     pub relax_after_secs: u64,
 }
@@ -1438,8 +1439,8 @@ impl Config {
             "mounts.glide_drop_m must be a number > 0"
         );
         ensure!(
-            m.glide_lookahead_m.is_finite() && m.glide_lookahead_m >= 4.0,
-            "mounts.glide_lookahead_m must be at least 4 m"
+            m.glide_lookahead_m.is_finite() && (4.0..=200.0).contains(&m.glide_lookahead_m),
+            "mounts.glide_lookahead_m must be between 4 and 200 m"
         );
         ensure!(
             m.glide_speed.is_finite() && m.glide_speed > 0.0 && m.glide_speed <= 25.0,
@@ -1450,9 +1451,14 @@ impl Config {
             "mounts.glide_descent must be in (0, 25] m/s"
         );
         ensure!(
-            self.dungeons.relax_after_secs <= 600,
-            "dungeons.relax_after_secs {} is above 600, the most a wish may wait for a smaller party",
-            self.dungeons.relax_after_secs
+        ensure!(
+            self.dungeons.relax_after_secs <= crate::bot::coordinator::MAX_RELAX_SECS,
+            "dungeons.relax_after_secs {} is above {}: the coordinator drops a party wish after \
+             {} s, so a longer wait would never form the smaller party",
+            self.dungeons.relax_after_secs,
+            crate::bot::coordinator::MAX_RELAX_SECS,
+            crate::bot::coordinator::WISH_TTL.as_secs()
+        );
         );
         ensure!(
             self.market.ad_interval_secs >= 60,
@@ -1921,8 +1927,11 @@ relax_after_secs = 45
         .unwrap();
         assert!(cfg.dungeons.entry_limit);
         assert_eq!(cfg.dungeons.relax_after_secs, 45);
-        // 601 s is longer than a wish may wait for a smaller party
-        assert!(Config::parse("[dungeons]\nrelax_after_secs = 601\n").is_err());
+        // the wish lifetime and the sweep period cap the wait below the gather window
+        let cap = crate::bot::coordinator::MAX_RELAX_SECS;
+        assert_eq!(cap, 600);
+        assert!(Config::parse(&format!("[dungeons]\nrelax_after_secs = {cap}\n")).is_ok());
+        assert!(Config::parse(&format!("[dungeons]\nrelax_after_secs = {}\n", cap + 1)).is_err());
         assert!(Config::parse("[dungeons]\nentry_limit = 1\n").is_err());
         assert!(Config::parse("[dungeons]\nentry_limits = true\n").is_err());
     }
@@ -1966,6 +1975,13 @@ glide_drop_m = 0.0
 ",
             "[mounts]
 glide_speed = 30.0
+",
+            // the ledge search samples the ground every tick: a huge look-ahead would stall a bot
+            "[mounts]
+glide_lookahead_m = 1000000.0
+",
+            "[mounts]
+glide_lookahead_m = 3.0
 ",
         ] {
             assert!(Config::parse(bad).is_err(), "{bad}");

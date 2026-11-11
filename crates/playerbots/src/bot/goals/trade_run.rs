@@ -476,7 +476,14 @@ pub fn carried_pack_in(world: &aa_world::World, equipment: &[EquipSlot]) -> Opti
 /// Whether the bot must not start anything but its trade run: it carries a pack, or one it
 /// dropped at a death spot waits to be picked up.
 pub fn pack_busy(ctx: &Ctx<'_>) -> bool {
-    carried_pack_of(ctx).is_some() || ctx.state.econ.lost_pack().is_some()
+    // (a note past its deadline no longer holds the bot: the recovery writes it off when the run
+    // next looks at it, but nothing else may wait for that)
+    carried_pack_of(ctx).is_some()
+        || ctx
+            .state
+            .econ
+            .lost_pack()
+            .is_some_and(|lost| ctx.now_ms < lost.until_ms)
 }
 
 /// The goals that are not drawn while [`pack_busy`]: every goal but the trade run. A carrying
@@ -1299,9 +1306,11 @@ fn find_bench(st: &BotState, plan: &Plan) -> Option<(u32, [f32; 3])> {
         .map(|c| (c.0, c.1))
 }
 
-/// The dropped-pack doodad in view near the death spot `at`: `(object, template, position,
-/// distance to the spot)`, nearest first.
+/// The dropped-pack doodad in view near the death spot `at` (the one nearest to the spot):
+/// `(object, template, position, distance to the bot)`. The distance is the bot's, not the
+/// spot's: the doodad is in view long before the bot is within reach of it.
 fn find_pack_doodad(env: &dyn Env, at: [f32; 3]) -> Option<(u32, u32, [f32; 3], f32)> {
+    let me = env.pos();
     env.state()
         .doodads
         .iter()
@@ -1309,6 +1318,7 @@ fn find_pack_doodad(env: &dyn Env, at: [f32; 3]) -> Option<(u32, u32, [f32; 3], 
         .map(|(&obj, d)| (obj, d.template, d.pos, dist2d(d.pos, at)))
         .filter(|c| c.3 <= ledger::PACK_NEAR_M)
         .min_by(|a, b| a.3.total_cmp(&b.3))
+        .map(|(obj, template, pos, _)| (obj, template, pos, dist2d(pos, me)))
 }
 
 /// The living buyer NPC in view that belongs to the planned spawn: `(object id, position)`.

@@ -734,6 +734,43 @@ fn a_dropped_pack_is_fetched_and_the_run_goes_on() {
 }
 
 #[test]
+fn a_dropped_pack_in_view_from_afar_is_walked_up_to_before_the_pickup() {
+    let mut f = Fake::new(true);
+    f.st.econ
+        .note_death_with_pack(PACK, [100.0, 0.0, 100.0], 0, f.now);
+    f.carry_plan = Some(Plan {
+        craft: 0,
+        bench_tpl: 0,
+        to_bench_m: 0.0,
+        ..plan()
+    });
+    // 20 m short of the death spot: inside the return radius, the doodad already in view
+    f.pos = [80.0, 0.0, 100.0];
+    f.show_pack(100.0, 0.0);
+    let mut g = run();
+    steps(&mut g, &mut f, 2);
+    assert_eq!(g.phase, Phase::Recover);
+    // no skill is sent from out of reach: the bot walks to the doodad first
+    assert!(
+        !f.out
+            .iter()
+            .any(|o| o.opcode == aa_proto::opcodes::cs::CSStartSkillPacket),
+        "the pickup was tried from 20 m away"
+    );
+    assert_eq!(
+        *f.travels.last().expect("a walk to the doodad"),
+        (100.0, 0.0, PACK_STOP_M)
+    );
+    // at the doodad the pickup is sent
+    f.arrive();
+    steps(&mut g, &mut f, 2);
+    assert_eq!(
+        f.out.last().unwrap(),
+        &cs::start_skill_doodad(PACK_RECOVER_SKILL, ME_OBJ, PACK_OBJ)
+    );
+}
+
+#[test]
 fn a_dropped_pack_that_is_gone_is_logged_and_counted() {
     let mut f = Fake::new(true);
     f.st.econ

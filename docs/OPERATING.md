@@ -143,7 +143,8 @@ Safety of the GM lines:
   (logged); `false` keeps dungeons to the bots whose level fits.
 * `[dungeons] relax_after_secs = 600` (default): how long a wish waits for a smaller party
   (the dungeon's `max_players`, at most five) before it starts; four bots start after 90 s of
-  rallying for a fifth, and the value is at most 600.
+  rallying for a fifth. At most 600: the coordinator drops a party wish after 720 s and the bot
+  gathers for at most 660 s, so a longer wait would never form the smaller party.
 * `[dungeons] entry_limit = false` (default): the bots do not count the server's entry limit (three
   entries per zone group and four hours) and never skip a dungeon for the count, as on the 1.2
   server (`Dungeons.EntryLimit` is off there). A refusal for the limit is still answered. `true`
@@ -560,8 +561,10 @@ own skill (`systems/skills/glider.rs`). The bot puts the best glider it owns in 
 (with `CSSwapItems`) while it is not fighting, and leaves a carried trade pack alone (the server
 refuses a glider swap while a pack is worn). While it walks with at least 20 m left it samples
 the ground up to `glide_lookahead_m` ahead: when the way falls away by at least `glide_drop_m` in one abrupt step
-(a cliff, not a slope), the line before the edge has no wall and the landing is dry, it deploys
-the glider and flies down along the current heading at `glide_speed` while descending
+(a cliff, not a slope), the line before the edge has no wall and the landing is dry, and the edge is
+within 6 m ahead (a cliff further off waits until the walk has brought it that close), it deploys
+the glider, runs the last steps along the ground until the ground falls away from under it, and
+then flies down along the current heading at `glide_speed` while descending
 `glide_descent`. The flight is the bot's own client-side physics (the 1.2 client's glider is not
 on the wire); it lands when the terrain meets it or the flight is 30 seconds old, sends the glide
 stance (4) in its movement updates and plans its navmesh route again from where it landed.
@@ -578,7 +581,7 @@ stance (4) in its movement updates and plans its navmesh route again from where 
 | `glider_item` | `0` | The glider item; `0` = the lowest-id glider of the bot's level (16385, Tooloop's old glider). |
 | `idle_despawn_secs` | `120` | Dismiss a standing mate after this long without a trip (0 = keep it). |
 | `glide_drop_m` | `8.0` | The smallest fall that is worth gliding, metres. |
-| `glide_lookahead_m` | `30.0` | How far ahead the ground is sampled for a ledge, metres. |
+| `glide_lookahead_m` | `30.0` | How far ahead the ground is sampled for a ledge, metres (4 to 200; a glide starts only when the edge is within 6 m). |
 | `glide_speed` | `9.0` | Glide horizontal speed, m/s. |
 | `glide_descent` | `3.0` | Glide descent, m/s. |
 

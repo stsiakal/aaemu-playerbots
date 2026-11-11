@@ -320,6 +320,12 @@ impl NavState {
 
     // ---- the trip -------------------------------------------------------------------------
 
+    /// The floor height the running trip was asked to reach (see [`NavState::begin`]), if it named
+    /// one: a trip that is planned again (after a glide) keeps it.
+    pub fn goal_z(&self) -> Option<f32> {
+        self.trip.as_ref().and_then(|t| t.goal_z)
+    }
+
     /// Starts a trip from `pos` to the stop point `radius` metres short of `goal`. A trip that is
     /// not `count`ed (the combat controller's) stays out of the trip statistics.
     pub fn begin(

@@ -26,6 +26,8 @@ pub const EQUIP_WAIT_MS: u64 = 4_000;
 pub const MOUNT_WAIT_MS: u64 = 5_000;
 /// How long `CSUnMountMate` may take to answer `SCUnitDetached`.
 pub const DISMOUNT_WAIT_MS: u64 = 5_000;
+/// After a dismount the server did not answer, the next one is not sent for this long.
+pub const DISMOUNT_RETRY_MS: u64 = 30_000;
 /// How long `CSRemoveMate` may take before the mate is forgotten (the server sends no answer).
 pub const DESPAWN_WAIT_MS: u64 = 3_000;
 /// After a refusal the same request is not sent again for this long.
@@ -43,6 +45,10 @@ pub const GLIDE_GAP_MS: u64 = 5_000;
 pub const GLIDE_REFUSE_MS: u64 = 2 * 60_000;
 /// A glide is only started with at least this much trip left (metres).
 pub const GLIDE_MIN_REMAINING_M: f32 = 20.0;
+/// A glide is only started when the edge is this close ahead (metres): the bot runs the last
+/// steps along the ground and glides when the ground falls away, so a cliff 30 m ahead is no
+/// reason to start (the glide would end on the level ground in front of it).
+pub const GLIDE_START_EDGE_M: f32 = 6.0;
 /// Two samples of the terrain closer than this below the step before are a cliff, not a slope
 /// (metres per [`LEDGE_STEP_M`]).
 const LEDGE_STEP_M: f32 = 2.0;
@@ -95,6 +101,8 @@ pub struct Ledge {
     pub ground: f32,
     /// The fall from the bot's height (metres).
     pub drop_m: f32,
+    /// Distance along the heading to the first sample past the edge (metres).
+    pub edge_m: f32,
 }
 
 /// What the caller knows this tick.
@@ -246,6 +254,9 @@ pub struct Mem {
     pub next_try_ms: u64,
     /// A refusal backs off every mount attempt until this bot clock.
     pub refused_until_ms: u64,
+    /// No dismount request before this bot clock (an unanswered one backs off, it is not re-sent
+    /// every few seconds).
+    pub dismount_retry_ms: u64,
     /// Bot clock the bot last moved (or stopped); the idle despawn counts from here.
     pub idle_since_ms: u64,
     /// The glider the bot knows (worn or being equipped).
@@ -596,6 +607,10 @@ fn glide_step(mem: &mut Mem, f: &Facts) -> Option<Act> {
         return None;
     }
     let ledge = f.ledge?;
+    if ledge.edge_m > GLIDE_START_EDGE_M {
+        // (still walking up to it; the ground ahead is looked at again next tick)
+        return None;
+    }
     mem.last_glide_ms = f.now_ms;
     mem.glide_skill = g.skill;
     mem.glide_sent_ms = f.now_ms;
@@ -668,7 +683,7 @@ fn mount_step(mem: &mut Mem, f: &Facts) -> Option<Act> {
             None
         }
         Phase::Mounted { .. } => {
-            if wants_dismount(mem, f) {
+            if wants_dismount(mem, f) && now >= mem.dismount_retry_ms {
                 mem.phase = Phase::Dismounting { since_ms: now };
                 return Some(Act::Dismount { tl: mem.mate_tl });
             }
@@ -678,6 +693,8 @@ fn mount_step(mem: &mut Mem, f: &Facts) -> Option<Act> {
             if now >= since_ms.saturating_add(DISMOUNT_WAIT_MS) {
                 mem.phase = Phase::Mounted { since_ms: now };
                 mem.refused_until_ms = now + REFUSE_MS;
+                // (a server that never answers is not asked again every five seconds)
+                mem.dismount_retry_ms = now + DISMOUNT_RETRY_MS;
             }
             None
         }
@@ -802,6 +819,7 @@ pub fn find_ledge(
                 dir,
                 ground: g,
                 drop_m: fallen,
+                edge_m: d,
             });
         }
         prev = g;

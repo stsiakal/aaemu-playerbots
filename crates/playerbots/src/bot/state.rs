@@ -874,6 +874,10 @@ impl BotState {
                     if *hp <= 0 && !self.me.dead {
                         // (the server says SCUnitDeath right after; if it does not, that is a finding)
                         self.watch.death.points_zero(self.now_ms);
+                        // The server sends the zero points BEFORE the death packet, and
+                        // `check_alive` marks the bot dead on them: the death packet then finds
+                        // it dead already, so the dropped pack is noted here, once per death.
+                        self.note_pack_drop();
                     }
                     self.check_alive();
                 } else if let Some(u) = self.units.get_mut(obj) {
@@ -1302,6 +1306,27 @@ impl BotState {
         self.watch.tracker.clear();
     }
 
+    /// The server drops the equipped trade pack as a doodad at the death spot right after the
+    /// death packet (`Character.DropTradePackToFloor`), before the item task removes it from the
+    /// back slot: remember where to look for it after the resurrection. Called once per death by
+    /// whichever packet shows the death first.
+    fn note_pack_drop(&mut self) {
+        let backpack = self
+            .equipment
+            .iter()
+            .find(|e| e.slot == aa_proto::sc_world::BACKPACK_SLOT)
+            .map_or(0, |e| e.template);
+        if backpack != 0 {
+            self.econ.note_death_with_pack(
+                backpack,
+                self.me.pos,
+                self.place.instance_id(),
+                self.now_ms,
+            );
+            self.reactions.pack_dropped = true;
+        }
+    }
+
     fn apply_death(&mut self, obj: u32, killer: u32, respawn_wait_ms: i32, reason: u8) {
         if obj == self.me.obj && self.me.obj != 0 {
             let was_dead = self.me.dead;
@@ -1324,24 +1349,9 @@ impl BotState {
             self.threats.clear();
             self.watch.death.death_packet();
             self.watch.tracker.clear();
-            // The server drops the equipped trade pack as a doodad at this spot right after the
-            // death packet (`Character.DropTradePackToFloor`), before the item task removes it
-            // from the back slot: remember where to look for it after the resurrection.
+            // (a death the zero points did not announce first; otherwise the pack is noted there)
             if !was_dead {
-                let backpack = self
-                    .equipment
-                    .iter()
-                    .find(|e| e.slot == aa_proto::sc_world::BACKPACK_SLOT)
-                    .map_or(0, |e| e.template);
-                if backpack != 0 {
-                    self.econ.note_death_with_pack(
-                        backpack,
-                        self.me.pos,
-                        self.place.instance_id(),
-                        self.now_ms,
-                    );
-                    self.reactions.pack_dropped = true;
-                }
+                self.note_pack_drop();
             }
             if self
                 .units
@@ -2139,6 +2149,64 @@ mod tests {
         }));
         assert!(s.econ.lost_pack().is_none());
         assert!(!std::mem::take(&mut s.reactions.pack_dropped));
+    }
+
+    #[test]
+    fn zero_points_before_the_death_packet_still_note_the_dropped_pack() {
+        // The server's order on a lethal hit: `SCUnitPoints` with 0 hit points, then
+        // `SCUnitDeath` (`reduce_current_hp` broadcasts the points, then runs `do_die`). The
+        // points mark the bot dead, so the death packet finds it dead already.
+        let mut s = in_world();
+        s.now_ms = 5_000;
+        s.me.pos = [100.0, 200.0, 300.0];
+        s.equipment.push(EquipSlot {
+            slot: aa_proto::sc_world::BACKPACK_SLOT,
+            template: 31_855,
+            id: 77,
+            grade: 0,
+        });
+        s.apply(&world(WorldEvent::UnitPoints {
+            obj: 0x400,
+            hp: 0,
+            mp: 0,
+        }));
+        assert!(s.me.dead);
+        let lost = s.econ.lost_pack().expect("the dropped pack is noted");
+        assert_eq!(
+            (lost.item, lost.pos, lost.inst, lost.at_ms),
+            (31_855, [100.0, 200.0, 300.0], 0, 5_000)
+        );
+        assert!(std::mem::take(&mut s.reactions.pack_dropped));
+        // the death packet that follows neither moves the note nor reports the drop again
+        s.now_ms = 5_020;
+        s.apply(&world(WorldEvent::UnitDeath {
+            obj: 0x400,
+            killer: 0,
+            respawn_wait_ms: 5_000,
+            lost_exp: 0,
+            reason: 0,
+        }));
+        assert_eq!(s.econ.lost_pack(), Some(lost));
+        assert!(!std::mem::take(&mut s.reactions.pack_dropped));
+        // a bot that logs in dead (hit points 0 before any other word) drops nothing
+        let mut s = in_world();
+        s.equipment.push(EquipSlot {
+            slot: aa_proto::sc_world::BACKPACK_SLOT,
+            template: 31_855,
+            id: 77,
+            grade: 0,
+        });
+        s.me.hp = 0;
+        s.check_alive();
+        assert!(s.me.dead);
+        assert!(s.econ.lost_pack().is_none());
+        // and the points of a bot that is dead already are not a second death
+        s.apply(&world(WorldEvent::UnitPoints {
+            obj: 0x400,
+            hp: 0,
+            mp: 0,
+        }));
+        assert!(s.econ.lost_pack().is_none());
     }
 
     #[test]

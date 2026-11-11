@@ -111,7 +111,7 @@ emotes = true
 entry_limit = false
 # A wish waits this many seconds for a full party (the dungeon's max_players, at most five) before
 # it goes with a smaller one (four bots start after 90 s of rallying, see the party planner). At
-# most 600.
+# most 600: a party wish is dropped after 720 s and the bot gathers for at most 660 s.
 relax_after_secs = 600
 
 [survival]
