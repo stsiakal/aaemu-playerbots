@@ -1451,14 +1451,12 @@ impl Config {
             "mounts.glide_descent must be in (0, 25] m/s"
         );
         ensure!(
-        ensure!(
             self.dungeons.relax_after_secs <= crate::bot::coordinator::MAX_RELAX_SECS,
             "dungeons.relax_after_secs {} is above {}: the coordinator drops a party wish after \
              {} s, so a longer wait would never form the smaller party",
             self.dungeons.relax_after_secs,
             crate::bot::coordinator::MAX_RELAX_SECS,
             crate::bot::coordinator::WISH_TTL.as_secs()
-        );
         );
         ensure!(
             self.market.ad_interval_secs >= 60,
