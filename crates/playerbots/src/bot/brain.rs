@@ -1312,6 +1312,7 @@ mod tests {
             party_id: 8,
             leader: 1,
             members: [1, 2, 3, 4, 5].into_iter().collect(),
+            roles: Default::default(),
             purpose: PartyPurpose::Guild,
         };
         let mut brain = Brain::new(&BehaviorCfg::default(), &Temperament::NEUTRAL);
@@ -1330,6 +1331,7 @@ mod tests {
             party_id: 4,
             leader: 1,
             members: [1, 2, 3].into_iter().collect(),
+            roles: Default::default(),
             purpose: PartyPurpose::Dungeon { zone_group: 9 },
         };
         let mut brain = Brain::new(&BehaviorCfg::default(), &Temperament::NEUTRAL);
